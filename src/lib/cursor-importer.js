@@ -41,9 +41,7 @@ function globalStateDb() {
 
 function insertSource(batch, sourcePath, kind) {
   let stat = { mtimeMs: null, size: null };
-  try {
-    stat = fs.statSync(sourcePath);
-  } catch {}
+  try { stat = fs.statSync(sourcePath); } catch {}
   batch.add(`INSERT OR REPLACE INTO sources
     (path, kind, mtime_ms, size, content_hash, imported_at, source)
     VALUES (${sqlString(sourcePath)}, ${sqlString(kind)}, ${sqlNumber(stat.mtimeMs)},
@@ -78,6 +76,18 @@ function insertToolEvent(batch, values) {
     NULL, NULL, NULL, NULL, NULL, ${sqlString(values.outputSummary)}, ${sqlString(SOURCE)})`);
 }
 
+function insertTokenUsage(batch, turnId, values) {
+  const key = sha256(`cursor:${turnId}:tokens`);
+  batch.add(`INSERT OR REPLACE INTO token_usage
+    (event_key, turn_id, timestamp, input_tokens, cached_input_tokens, output_tokens,
+     reasoning_output_tokens, total_tokens, primary_used_percent, secondary_used_percent,
+     evidence_id, source)
+    VALUES (${sqlString(key)}, ${sqlString(turnId)}, NULL,
+    ${sqlNumber(values.inputTokens)}, NULL, ${sqlNumber(values.outputTokens)},
+    NULL, ${sqlNumber((values.inputTokens || 0) + (values.outputTokens || 0))},
+    NULL, NULL, NULL, ${sqlString(SOURCE)})`);
+}
+
 function importComposers(db, batch, dbPath) {
   const row = db.prepare("SELECT value FROM ItemTable WHERE key='composer.composerHeaders'").get();
   if (!row?.value) return 0;
@@ -105,10 +115,45 @@ function importComposers(db, batch, dbPath) {
   return composers.length;
 }
 
+function importTokenUsage(db, batch) {
+  // bubbleId:<composerId>:<bubbleId> entries on assistant bubbles (type=2)
+  // hold tokenCount.inputTokens / outputTokens. Aggregate per composer so
+  // each turn gets a single token_usage row summing all its assistant turns.
+  const rows = db.prepare(`
+    SELECT
+      substr(key, 10, instr(substr(key, 10), ':') - 1) AS composerId,
+      json_extract(CAST(value AS TEXT), '$.tokenCount.inputTokens')  AS input,
+      json_extract(CAST(value AS TEXT), '$.tokenCount.outputTokens') AS output
+    FROM cursorDiskKV
+    WHERE key LIKE 'bubbleId:%'
+      AND json_extract(CAST(value AS TEXT), '$.tokenCount.inputTokens') > 0
+  `).all();
+
+  const byComposer = new Map();
+  for (const r of rows) {
+    if (!r.composerId) continue;
+    const prev = byComposer.get(r.composerId) || { input: 0, output: 0 };
+    byComposer.set(r.composerId, {
+      input: prev.input + (r.input || 0),
+      output: prev.output + (r.output || 0)
+    });
+  }
+
+  for (const [composerId, totals] of byComposer) {
+    insertTokenUsage(batch, `cursor:${composerId}`, {
+      inputTokens: totals.input,
+      outputTokens: totals.output
+    });
+  }
+
+  const totalInput = [...byComposer.values()].reduce((s, v) => s + v.input, 0);
+  const totalOutput = [...byComposer.values()].reduce((s, v) => s + v.output, 0);
+  return { composers: byComposer.size, inputTokens: totalInput, outputTokens: totalOutput };
+}
+
 function importToolCalls(db, batch) {
   // agentKv:blob:* entries are content-addressed conversation messages.
-  // Assistant messages contain arrays of content parts; tool-call parts
-  // hold real tool invocations (read_file, search_replace, Shell, Write, etc.)
+  // Assistant messages contain tool-call content parts.
   const rows = db.prepare(
     "SELECT key, value FROM cursorDiskKV WHERE typeof(value)='blob' AND CAST(value AS TEXT) LIKE '%\"type\":\"tool-call\"%'"
   ).all();
@@ -147,10 +192,12 @@ export function importCursor() {
 
   let composerCount = 0;
   let toolCallCount = 0;
+  let tokenStats = { composers: 0, inputTokens: 0, outputTokens: 0 };
 
   try {
     composerCount = importComposers(db, batch, dbPath);
     toolCallCount = importToolCalls(db, batch);
+    tokenStats = importTokenUsage(db, batch);
   } finally {
     db.close();
   }
@@ -160,6 +207,7 @@ export function importCursor() {
   return {
     source: SOURCE,
     composers: composerCount,
-    toolCalls: toolCallCount
+    toolCalls: toolCallCount,
+    tokens: tokenStats
   };
 }
