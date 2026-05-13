@@ -17,6 +17,7 @@ import {
   YAxis,
 } from "recharts";
 import { useChartDateBrush } from "./use-chart-date-brush";
+import { CostOverviewSkeleton, PanelAnchor } from "./ux-bits";
 
 // ─── data shapes ─────────────────────────────────────────────────────────
 
@@ -394,9 +395,7 @@ export default function CostOverviewView({
 
   if (loading && !data) {
     return (
-      <section className="panel p-12 text-center text-sm text-slate-500">
-        Loading cost analytics…
-      </section>
+      <CostOverviewSkeleton />
     );
   }
 
@@ -450,7 +449,7 @@ export default function CostOverviewView({
       {/* ─── daily cost trend ──────────────────────────────────────────── */}
       <div className="panel p-4">
         <div className="mb-3 flex items-baseline justify-between">
-          <h2 className="text-lg font-semibold text-ink">
+          <h2 id="daily-spend" className="group text-lg font-semibold text-ink">
             Daily Spend
             {onSelectRange && (
               <span className="ml-2 text-xs font-normal text-slate-400">
@@ -458,6 +457,7 @@ export default function CostOverviewView({
               </span>
             )}
           </h2>
+          <PanelAnchor id="daily-spend" />
           <span className="text-xs text-slate-500">
             fresh input + output · cached shown in Cache panel
           </span>
@@ -506,7 +506,7 @@ export default function CostOverviewView({
       {/* ─── source split + cache panel ───────────────────────────────── */}
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="panel p-4">
-          <h2 className="text-lg font-semibold text-ink">Claude vs Codex</h2>
+          <h2 id="claude-vs-codex" className="group text-lg font-semibold text-ink">Claude vs Codex<PanelAnchor id="claude-vs-codex" /></h2>
           <p className="text-xs text-slate-500">share of total spend</p>
           {sourcePie.length === 0 ? (
             <div className="p-6 text-sm text-slate-500">No data</div>
@@ -549,7 +549,7 @@ export default function CostOverviewView({
         </div>
 
         <div className="panel p-4">
-          <h2 className="text-lg font-semibold text-ink">Cache Effectiveness</h2>
+          <h2 id="cache-effectiveness" className="group text-lg font-semibold text-ink">Cache Effectiveness</h2>
           <p className="text-xs text-slate-500">prompt caching is doing most of the work</p>
           <div className="mt-3 space-y-3 text-sm">
             <div className="flex items-baseline justify-between">
@@ -587,7 +587,7 @@ export default function CostOverviewView({
         </div>
 
         <div className="panel p-4">
-          <h2 className="text-lg font-semibold text-ink">Burn Alerts</h2>
+          <h2 id="burn-alerts" className="group text-lg font-semibold text-ink">Burn Alerts</h2>
           <p className="text-xs text-slate-500">
             days where spend &gt; 3× median ({usd(h.median_daily_cost)}/day)
           </p>
