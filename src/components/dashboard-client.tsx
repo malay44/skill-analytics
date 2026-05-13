@@ -1,6 +1,9 @@
 "use client";
 
+import CostOverviewView from "./cost-overview-view";
 import JudgmentsView from "./judgments-view";
+import { useChartDateBrush } from "./use-chart-date-brush";
+import WrappedView from "./wrapped-view";
 import {
   Activity,
   AlertTriangle,
@@ -32,7 +35,6 @@ import {
   LineChart,
   Pie,
   PieChart,
-  ReferenceArea,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -283,90 +285,6 @@ function shortPath(value?: string) {
   return value;
 }
 
-/**
- * Hook that turns any Recharts time-series chart into a click-and-drag
- * date-range selector. Spread `chartProps` onto `<LineChart>` /
- * `<AreaChart>` / `<BarChart>`, render `selectionOverlay()` inside the
- * chart, and pass `onSelect` to receive the chosen [from, to] day pair
- * (already sorted left-to-right).
- *
- * Behavior:
- *  - mousedown on a data point records the left bound
- *  - mousemove with the button held records the right bound and renders
- *    a translucent <ReferenceArea> across the selection
- *  - mouseup with a non-empty range fires onSelect and clears overlay
- *  - leaving the chart while dragging cancels (no half-selections)
- *
- * The chart's data must have a `day` field whose values are sortable
- * strings — YYYY-MM-DD works as-is.
- */
-function useChartDateBrush(onSelect: (from: string, to: string) => void) {
-  const [left, setLeft] = useState<string | null>(null);
-  const [right, setRight] = useState<string | null>(null);
-  const isDragging = left != null;
-
-  const reset = () => {
-    setLeft(null);
-    setRight(null);
-  };
-
-  // While the user is dragging the chart, the browser would normally
-  // select all surrounding text (chart axis labels, panel headings,
-  // etc.) — the standard side-effect of any mousedown+drag. Block it at
-  // the document level for the duration of the drag.
-  useEffect(() => {
-    if (!isDragging) return;
-    const prev = document.body.style.userSelect;
-    document.body.style.userSelect = "none";
-    return () => {
-      document.body.style.userSelect = prev;
-    };
-  }, [isDragging]);
-
-  const chartProps = {
-    onMouseDown: (e: { activeLabel?: string } | null) => {
-      const lab = e?.activeLabel;
-      if (typeof lab === "string" && lab) {
-        setLeft(lab);
-        setRight(lab);
-      }
-    },
-    onMouseMove: (e: { activeLabel?: string } | null) => {
-      if (left == null) return;
-      const lab = e?.activeLabel;
-      if (typeof lab === "string" && lab) setRight(lab);
-    },
-    onMouseUp: () => {
-      if (left != null && right != null && left !== right) {
-        const [from, to] = [left, right].sort();
-        onSelect(from, to);
-      }
-      reset();
-    },
-    onMouseLeave: reset,
-    // crosshair cursor + suppress text selection at the element level
-    // too (defense-in-depth alongside the document-level guard above).
-    style: {
-      cursor: "crosshair",
-      userSelect: "none",
-      WebkitUserSelect: "none",
-    } as React.CSSProperties,
-  };
-
-  const selectionOverlay = () =>
-    left && right && left !== right ? (
-      <ReferenceArea
-        x1={left}
-        x2={right}
-        strokeOpacity={0.3}
-        fill="#0f8f8a"
-        fillOpacity={0.15}
-      />
-    ) : null;
-
-  return { chartProps, selectionOverlay };
-}
-
 function StatCard({
   label,
   value,
@@ -431,6 +349,68 @@ function EmptyState({ text, loading = false }: { text: string; loading?: boolean
   );
 }
 
+/**
+ * Compact "synced N ago" indicator with a toggle for the 30-minute auto
+ * import. Lives next to the manual Import / Refresh buttons.
+ */
+function SyncStatus({
+  lastSyncedAt,
+  importing,
+  autoSyncEnabled,
+  onToggle,
+}: {
+  lastSyncedAt: number | null;
+  importing: boolean;
+  autoSyncEnabled: boolean;
+  onToggle: () => void;
+}) {
+  // Re-render the relative-time label every 30s so "synced X min ago"
+  // stays accurate without nagging the rest of the app.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((n) => n + 1), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const label = (() => {
+    if (importing) return "Syncing…";
+    if (!lastSyncedAt) return autoSyncEnabled ? "Auto-sync on" : "Auto-sync off";
+    const secs = Math.floor((Date.now() - lastSyncedAt) / 1000);
+    if (secs < 60) return "Synced just now";
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return `Synced ${mins}m ago`;
+    return `Synced ${Math.floor(mins / 60)}h ago`;
+  })();
+
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      title={
+        autoSyncEnabled
+          ? "Auto-sync runs every 30 minutes. Click to disable."
+          : "Auto-sync disabled. Click to re-enable."
+      }
+      className={`inline-flex h-10 items-center gap-2 rounded-md border px-3 text-xs font-medium tabular-nums ${
+        autoSyncEnabled
+          ? "border-emerald-300 bg-emerald-50 text-emerald-800 hover:border-emerald-400"
+          : "border-line bg-white text-slate-500 hover:border-rose-400"
+      }`}
+    >
+      <span
+        className={`inline-block h-2 w-2 rounded-full ${
+          importing
+            ? "animate-pulse bg-amber-500"
+            : autoSyncEnabled
+            ? "bg-emerald-500"
+            : "bg-slate-400"
+        }`}
+      />
+      {label}
+    </button>
+  );
+}
+
 function ChartSkeleton({ height = "h-80" }: { height?: string }) {
   // Bar-chart-shaped skeleton so the panel doesn't visually collapse during refetch.
   const bars = Array.from({ length: 12 }, (_, i) => 30 + ((i * 37) % 60));
@@ -467,10 +447,26 @@ export default function DashboardClient() {
   const [errors, setErrors] = useState<ErrorRow[]>([]);
   const [timeline, setTimeline] = useState<TimelineRow[]>([]);
   const [query, setQuery] = useState("");
-  const [active, setActive] = useState<"overview" | "skills" | "errors" | "timeline" | "comparison" | "pricing" | "judgments">("overview");
+  // "cost" is the new default landing — tokens/sessions/cost are the
+  // center stage after the pivot away from skill-centric analytics.
+  // Consolidated post-pivot tab set. "overview", "errors", and "pricing"
+  // accept-but-render-as "skills" so deep links from older bookmarks
+  // still land somewhere sensible.
+  const [active, setActive] = useState<"cost" | "wrapped" | "skills" | "timeline" | "comparison" | "judgments">("cost");
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string>("");
+  // Auto-sync: timestamp of the last successful import this session. Used
+  // both to display "synced X ago" and to power the 30-min interval below.
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState(true);
+  // Update-from-GitHub state. `available` is null when we haven't asked
+  // yet (don't show the button); a number when we know how many commits
+  // we're behind upstream; 0 when we've checked and are current.
+  const [updating, setUpdating] = useState(false);
+  const [updateMsg, setUpdateMsg] = useState<string | null>(null);
+  const [updateAvailable, setUpdateAvailable] = useState<number | null>(null);
+  const [updateCommits, setUpdateCommits] = useState<{ sha: string; subject: string }[]>([]);
   const [evidence, setEvidence] = useState<Record<string, unknown> | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<SkillCategoryFilter>("all");
   const [projectFilter, setProjectFilter] = useState<string>("all");
@@ -553,6 +549,7 @@ export default function DashboardClient() {
       const response = await fetch("/api/import", { method: "POST" });
       const body = await response.json();
       if (!body.ok) setImportError(String(body.error || "Import failed"));
+      else setLastSyncedAt(Date.now());
       await loadData();
     } catch (error) {
       setImportError(error instanceof Error ? error.message : String(error));
@@ -560,6 +557,153 @@ export default function DashboardClient() {
       setImporting(false);
     }
   }
+
+  async function runUpdate() {
+    setUpdating(true);
+    setUpdateMsg(null);
+    try {
+      const r = await fetch("/api/update", { method: "POST" });
+      const j = await r.json();
+      if (!j.ok) {
+        setUpdateMsg(
+          `${j.step || "update"} failed: ${j.error || "unknown"}${
+            j.details ? "\n" + j.details : ""
+          }`
+        );
+        return;
+      }
+      if (j.already_up_to_date) {
+        setUpdateMsg("Already up to date.");
+      } else {
+        setUpdateMsg(
+          `Pulled new commits.${
+            j.install_ran ? " Dependencies installed." : ""
+          }${j.needs_restart ? " Server restart recommended for native changes." : ""}`
+        );
+      }
+      // Re-check availability so the button hides itself after a
+      // successful pull (no more commits to fetch).
+      checkForUpdates();
+    } catch (e) {
+      setUpdateMsg(`update failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setUpdating(false);
+      setTimeout(() => setUpdateMsg(null), 12_000);
+    }
+  }
+
+  async function checkForUpdates() {
+    try {
+      const r = await fetch("/api/update/check");
+      const j = await r.json();
+      if (!j.ok) {
+        // Silent — this is a background poll. Failures (no remote, not a
+        // repo, no network) shouldn't shout at the user.
+        setUpdateAvailable(null);
+        return;
+      }
+      setUpdateAvailable(j.behind_by || 0);
+      setUpdateCommits(j.commits || []);
+    } catch {
+      setUpdateAvailable(null);
+    }
+  }
+
+  // Check on mount, then every 15 minutes thereafter, and whenever the
+  // tab regains focus (covers "I left it open overnight" cases).
+  useEffect(() => {
+    checkForUpdates();
+    const id = window.setInterval(checkForUpdates, 15 * 60 * 1000);
+    const onFocus = () => checkForUpdates();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
+
+  // Prefetch endpoints for tabs the user hasn't opened yet, so switching
+  // is instantaneous. Browser cache picks these up; the per-tab views
+  // fire the same fetches and get cache hits. Fires once on mount with
+  // a small delay so the initial paint isn't competing with these.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      const urls = [
+        "/api/metrics/cost-overview",
+        "/api/metrics/wrapped",
+        "/api/metrics/comparison",
+        "/api/metrics/judgments",
+        "/api/metrics/fun-facts",
+      ];
+      for (const u of urls) {
+        fetch(u).catch(() => { /* prefetch is best-effort */ });
+      }
+    }, 400);
+    return () => window.clearTimeout(t);
+  }, []);
+
+  // Keyboard shortcuts. 1–6 jumps tabs, ⌘I (or Ctrl+I) imports, "/"
+  // focuses the Skills search box, ⌘K is reserved for a future palette.
+  // Disabled when the user is typing in an input / textarea so we don't
+  // hijack normal text editing.
+  useEffect(() => {
+    const tabsByDigit: Record<string, typeof active> = {
+      "1": "cost",
+      "2": "wrapped",
+      "3": "comparison",
+      "4": "timeline",
+      "5": "judgments",
+      "6": "skills",
+    };
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const inField =
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+      // ⌘I / Ctrl+I always — even from inputs — to import without losing focus.
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "i") {
+        e.preventDefault();
+        if (!importing) runImport();
+        return;
+      }
+      if (inField) return;
+      if (e.key === "/" && active === "skills") {
+        const el = document.getElementById("skills-search") as HTMLInputElement | null;
+        if (el) {
+          e.preventDefault();
+          el.focus();
+          el.select();
+        }
+        return;
+      }
+      if (tabsByDigit[e.key]) {
+        e.preventDefault();
+        setActive(tabsByDigit[e.key]);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, importing]);
+
+  // Auto-sync every 30 minutes while the tab is open. Skip if a manual
+  // import is already in flight (avoids overlapping POSTs and the
+  // associated VACUUM contention on SQLite). The setInterval is paused
+  // when the tab is hidden so we don't burn CPU while in the background.
+  useEffect(() => {
+    if (!autoSyncEnabled) return;
+    const THIRTY_MIN_MS = 30 * 60 * 1000;
+    const tick = () => {
+      if (document.hidden) return;
+      if (importing) return;
+      runImport();
+    };
+    const id = window.setInterval(tick, THIRTY_MIN_MS);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSyncEnabled, importing]);
 
   async function openEvidence(id?: string) {
     if (!id) return;
@@ -692,42 +836,64 @@ export default function DashboardClient() {
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm font-semibold text-teal">
             <BarChart3 size={18} />
-            Skill Analytics
+            AI Tab
           </div>
           <h1 className="mt-2 text-2xl font-semibold tracking-normal text-ink sm:text-3xl">
-            Codex skill usage and health
+            Your AI coding tab
           </h1>
           <p className="mt-2 max-w-3xl text-sm text-slate-600">
-            Historical inference from Codex sessions plus explicit skill lifecycle events.
+            Cost, tokens, and sessions across Claude Code and Codex — local-only,
+            computed from the JSONL transcripts already on your machine.
           </p>
         </div>
-        <div className="flex w-full flex-wrap items-center gap-2 lg:w-auto">
-          <div className="relative min-w-0 flex-1 sm:flex-none">
-            <Search
-              size={16}
-              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
-            />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Filter skills or errors"
-              className="h-10 w-full rounded-md border border-line bg-white pl-9 pr-3 text-sm outline-none focus:border-teal sm:w-64"
-            />
-          </div>
-          <button
-            onClick={loadData}
-            className="inline-flex h-10 items-center gap-2 rounded-md border border-line bg-white px-3 text-sm font-medium text-ink hover:border-teal"
-          >
-            <RefreshCw size={16} />
-            <span className="hidden sm:inline">Refresh</span>
-          </button>
+        {/* Header right rail: three controls only. Used to be five
+            (search + sync + update + refresh + import) which overflowed
+            to a second line on common laptop widths. The search lived
+            here from the skill-centric era and is now part of the
+            Skills tab's FilterBar; the manual Refresh is redundant
+            since Import already calls loadData() after it completes. */}
+        <div className="flex shrink-0 items-center gap-2">
+          <SyncStatus
+            lastSyncedAt={lastSyncedAt}
+            importing={importing}
+            autoSyncEnabled={autoSyncEnabled}
+            onToggle={() => setAutoSyncEnabled((v) => !v)}
+          />
+          {(() => {
+            const hasUpdate = !!(updateAvailable && updateAvailable > 0);
+            return (
+              <button
+                onClick={runUpdate}
+                disabled={updating}
+                title={
+                  updateCommits.length > 0
+                    ? `${updateAvailable} new commit${updateAvailable === 1 ? "" : "s"}:\n` +
+                      updateCommits.slice(0, 6).map((c) => `  ${c.sha} ${c.subject}`).join("\n")
+                    : hasUpdate
+                    ? `${updateAvailable} new commits available`
+                    : "git pull --ff-only + npm install if deps changed"
+                }
+                className={
+                  hasUpdate
+                    ? "inline-flex h-10 items-center gap-2 rounded-md border-2 border-amber-400 bg-amber-50 px-3 text-sm font-medium text-amber-900 hover:bg-amber-100 disabled:cursor-wait disabled:opacity-50"
+                    : "inline-flex h-10 items-center gap-2 rounded-md border border-line bg-white px-3 text-sm font-medium text-ink hover:border-teal disabled:cursor-wait disabled:opacity-50"
+                }
+              >
+                <span className={updating ? "inline-block animate-spin" : hasUpdate ? "animate-pulse" : ""}>⤓</span>
+                <span className="hidden sm:inline">
+                  {updating ? "Updating…" : hasUpdate ? `Update (${updateAvailable})` : "Update"}
+                </span>
+              </button>
+            );
+          })()}
           <button
             onClick={runImport}
             disabled={importing}
+            title="Re-scan ~/.claude and ~/.codex transcripts (⌘I)"
             className="inline-flex h-10 items-center gap-2 rounded-md bg-ink px-3 text-sm font-medium text-white hover:bg-teal disabled:cursor-wait disabled:opacity-70"
           >
             <Database size={16} />
-            {importing ? "Importing" : "Import"}
+            <span className="hidden sm:inline">{importing ? "Importing" : "Import"}</span>
           </button>
         </div>
         {importError && (
@@ -735,48 +901,80 @@ export default function DashboardClient() {
             Import failed: {importError.slice(0, 200)}
           </div>
         )}
+        {updateMsg && (
+          <div
+            className={`mt-2 whitespace-pre-wrap text-xs ${
+              updateMsg.includes("failed") ? "text-rose-600" : "text-emerald-700"
+            }`}
+            title={updateMsg}
+          >
+            {updateMsg}
+          </div>
+        )}
       </header>
 
-      <FilterBar
-        skills={skills}
-        projects={projects}
-        category={categoryFilter}
-        project={projectFilter}
-        hideUnused={hideUnused}
-        source={sourceFilter}
-        dateFrom={dateFrom}
-        dateTo={dateTo}
-        onCategory={setCategoryFilter}
-        onProject={setProjectFilter}
-        onHideUnused={setHideUnused}
-        onSource={setSourceFilter}
-        onDateFrom={setDateFrom}
-        onDateTo={setDateTo}
-        filteredCount={filteredSkills.length}
-      />
+      {/* FilterBar moved into the Skills tab — its controls (category,
+          project, hide-unused) only make sense for the skill-centric
+          views. Date range is now driven by click-and-drag on the
+          time-series charts (see useChartDateBrush). Source filter
+          (claude vs codex) still lives here when on Skills, where it
+          changes the per-source counts shown in those panels. */}
 
-      <nav className="flex flex-wrap gap-2">
+      <nav
+        className="flex flex-wrap gap-2"
+        aria-label="Dashboard sections (1–6 to jump)"
+      >
         {[
-          ["overview", "Overview"],
-          ["skills", "Skill Health"],
-          ["errors", "Errors"],
-          ["timeline", "Timeline"],
+          // Post-pivot nav: Cost & Tokens is the center stage. Wrapped
+          // is the shareable view. Comparison (Claude/Codex/Cursor) stays.
+          // Skills/Errors/Pricing collapsed into one "Skills" tab so the
+          // nav doesn't bury the cost-centric experience under legacy
+          // skill-tracking views.
+          ["cost", "Cost & Tokens"],
+          ["wrapped", "Wrapped"],
           ["comparison", "Compare"],
-          ["pricing", "Pricing"],
-          ["judgments", "Judgments"]
-        ].map(([id, label]) => (
-          <button
-            key={id}
-            onClick={() => setActive(id as typeof active)}
-            className={`h-9 rounded-md border px-3 text-sm font-medium ${
-              active === id
-                ? "border-ink bg-ink text-white"
-                : "border-line bg-white text-slate-600 hover:border-teal"
-            }`}
-          >
-            {label}
-          </button>
-        ))}
+          ["timeline", "Timeline"],
+          ["judgments", "Judgments"],
+          ["skills", "Skills"]
+        ].map(([id, label], i) => {
+          const isWrapped = id === "wrapped";
+          const isActive = active === id;
+          const base =
+            "group inline-flex h-9 items-center gap-1.5 rounded-md border px-3 text-sm font-medium transition-colors";
+          let cls = "";
+          if (isWrapped) {
+            cls = isActive
+              ? "border-teal bg-teal text-white"
+              : "border-teal bg-white text-teal hover:bg-teal hover:text-white";
+          } else if (isActive) {
+            cls = "border-ink bg-ink text-white";
+          } else {
+            cls = "border-line bg-white text-slate-600 hover:border-teal";
+          }
+          // Small numeric hint shows the keyboard shortcut. Dimmed
+          // unless hovered/active — discoverable, not noisy.
+          const digit = i + 1;
+          return (
+            <button
+              key={id}
+              onClick={() => setActive(id as typeof active)}
+              className={`${base} ${cls}`}
+              title={`Jump with ${digit}`}
+              aria-keyshortcuts={String(digit)}
+            >
+              <span>{label}</span>
+              <kbd
+                className={`hidden rounded px-1 text-[10px] tabular-nums sm:inline ${
+                  isActive
+                    ? "bg-white/20 text-white/80"
+                    : "bg-slate-100 text-slate-400 group-hover:bg-slate-200"
+                }`}
+              >
+                {digit}
+              </kbd>
+            </button>
+          );
+        })}
       </nav>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -814,7 +1012,51 @@ export default function DashboardClient() {
         />
       </section>
 
-      {active === "overview" && (
+      {active === "cost" && (
+        <CostOverviewView filterQS={filterQS} onSelectRange={handleChartDateSelect} />
+      )}
+      {active === "wrapped" && <WrappedView filterQS={filterQS} />}
+
+      {active === "skills" && (
+        <div className="flex flex-col gap-3">
+          {/* Skill-scoped free-text search lives inside the Skills tab
+              now (used to be in the global header). Keeps the cost
+              experience uncluttered. Press "/" anywhere on this tab to
+              focus the input. */}
+          <div className="relative">
+            <Search
+              size={16}
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+            />
+            <input
+              id="skills-search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Filter skills or errors  (press /)"
+              className="h-10 w-full rounded-md border border-line bg-white pl-9 pr-3 text-sm outline-none focus:border-teal sm:w-72"
+            />
+          </div>
+          <FilterBar
+            skills={skills}
+            projects={projects}
+            category={categoryFilter}
+            project={projectFilter}
+            hideUnused={hideUnused}
+            source={sourceFilter}
+            dateFrom={dateFrom}
+            dateTo={dateTo}
+            onCategory={setCategoryFilter}
+            onProject={setProjectFilter}
+            onHideUnused={setHideUnused}
+            onSource={setSourceFilter}
+            onDateFrom={setDateFrom}
+            onDateTo={setDateTo}
+            filteredCount={filteredSkills.length}
+          />
+        </div>
+      )}
+
+      {active === "skills" && (
         <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
           <div className="panel p-4">
             <div className="mb-3 flex items-center justify-between">
@@ -1101,7 +1343,7 @@ export default function DashboardClient() {
         </section>
       )}
 
-      {active === "errors" && (
+      {active === "skills" && (
         <section className="panel overflow-hidden">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line p-4">
             <div>
@@ -1227,7 +1469,7 @@ export default function DashboardClient() {
       {active === "comparison" && (
         <ComparisonView data={comparison} onSelectRange={handleChartDateSelect} />
       )}
-      {active === "pricing" && <PricingView data={pricing} loading={loading} />}
+      {active === "skills" && <PricingView data={pricing} loading={loading} />}
       {active === "judgments" && <JudgmentsView />}
 
       {evidence ? (

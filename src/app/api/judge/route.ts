@@ -52,18 +52,20 @@ export async function POST(req: Request) {
         { status: 400 }
       );
     }
-    limit = Math.min(MAX_LIMIT, Math.floor(parsed));
+    limit = Math.min(MAX_LIMIT, Math.floor(parsed)) as typeof limit;
   }
   // Treat "" / "all" as no filter — otherwise these become literal SQL
   // equality checks for skill_name and silently return zero candidates.
   const skillRaw = url.searchParams.get("skill");
-  const skill = skillRaw && skillRaw !== "" && skillRaw.toLowerCase() !== "all" ? skillRaw : null;
+  const skill: string | null = skillRaw && skillRaw !== "" && skillRaw.toLowerCase() !== "all" ? skillRaw : null;
   let candidates;
   try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const opts: any = { limit, ...(skill ? { skill } : {}) };
     candidates =
       judge === "codex"
-        ? codexTiebreakerCandidates({ limit, skill })
-        : unjudgedInvocations({ limit, skill, judge });
+        ? codexTiebreakerCandidates(opts)
+        : unjudgedInvocations({ ...opts, judge });
   } catch (e) {
     return NextResponse.json(
       { ok: false, error: e instanceof Error ? e.message : String(e) },
